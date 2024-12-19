@@ -1,0 +1,142 @@
+---
+title: "comparison"
+author: "Yuxuan Du"
+date: "2024-11-28"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+GSE_data = read_csv('gene_analysis_results_100_GSE.csv')
+GSE_data= GSE_data|>
+  filter(P_IPW<=0.05)
+```
+
+```{r}
+ridge_data = read_tsv('ridge_coefficients.tsv')
+ridge_data = ridge_data[ridge_data$Variable %in% GSE_data$Gene, ]
+```
+
+```{r}
+ida_data = read_csv('ida_median_results.csv')
+ida_data = ida_data[ida_data$Gene %in% GSE_data$Gene, ]
+```
+
+```{r}
+en_data = read_tsv('en_coefficients.tsv')
+en_data = en_data[en_data$Variable %in% GSE_data$Gene, ]
+```
+
+```{r}
+lr_data = read_tsv('logistic_coefficients.tsv')
+lr_data = lr_data[lr_data$Gene %in% GSE_data$Gene, ]
+```
+
+```{r}
+ridge_data$abs_effect = abs(ridge_data$s0)
+ridge_data <- ridge_data[order(-ridge_data$abs_effect), ]
+ridge_data = ridge_data$Variable
+```
+
+```{r}
+ida_data$abs_effect = abs(ida_data$MedianEffect)
+ida_data <- ida_data[order(-ida_data$abs_effect), ]
+ida_data = ida_data$Gene
+```
+
+```{r}
+en_data$abs_effect = abs(en_data$s0)
+en_data <- en_data[order(-en_data$abs_effect), ]
+en_data = en_data$Variable
+```
+
+```{r}
+lr_data$abs_effect = abs(lr_data$lr_coefficients)
+lr_data <- lr_data[order(-lr_data$abs_effect), ]
+lr_data = lr_data$Gene
+```
+
+```{r}
+CSTAR_data = read_csv('gene_analysis_results_Cstar_cancer.csv')
+CSTAR_data = CSTAR_data[CSTAR_data$Gene %in% GSE_data$Gene, ]
+```
+
+```{r}
+CSTAR_data <- CSTAR_data[order(-CSTAR_data$medianEffect), ]
+CSTAR_data = CSTAR_data$Gene
+```
+
+```{r}
+GSE_data$abs_IPW_effect = abs(GSE_data$Coefficient_IPW)
+GSE_data_IPW = GSE_data[order(-GSE_data$abs_IPW_effect), ]
+GSE_data_effect_IPW = GSE_data_IPW$Gene
+```
+
+
+```{r}
+calculate_overlap <- function(subset1, subset2) {
+  size_intersection <- length(intersect(subset1, subset2))
+  size_min <- min(length(subset1), length(subset2))
+  overlap_coefficient <- size_intersection / size_min
+  return(overlap_coefficient)
+}
+```
+
+```{r}
+thresholds <- seq(5, 65, by = 1)
+
+overlap_values_IPW <- sapply(thresholds, function(k) {
+  subset1 <- CSTAR_data[1:k]
+  subset2 <- GSE_data_effect_IPW[1:k]
+  calculate_overlap(subset1, subset2)
+})
+```
+
+```{r}
+overlap_values_ridge <- sapply(thresholds, function(k) {
+  subset1 <- CSTAR_data[1:k]
+  subset2 <- ridge_data[1:k]
+  calculate_overlap(subset1, subset2)
+})
+```
+
+```{r}
+overlap_values_en <- sapply(thresholds, function(k) {
+  subset1 <- CSTAR_data[1:k]
+  subset2 <- en_data[1:k]
+  calculate_overlap(subset1, subset2)
+})
+```
+
+```{r}
+overlap_values_lr <- sapply(thresholds, function(k) {
+  subset1 <- CSTAR_data[1:k]
+  subset2 <- lr_data[1:k]
+  calculate_overlap(subset1, subset2)
+})
+```
+
+```{r}
+overlap_values_ida <- sapply(thresholds, function(k) {
+  subset1 <- CSTAR_data[1:k]
+  subset2 <- ida_data[1:k]
+  calculate_overlap(subset1, subset2)
+})
+```
+
+```{r}
+plot(thresholds, overlap_values_IPW, type = "b", col = "blue", lwd = 2, pch = 16,
+     ylim = c(0, 1), xlab = "Threshold (Top-k Genes)", ylab = "Overlap Coefficient",
+     main = "Overlap Coefficient Comparison")
+
+lines(thresholds, overlap_values_ridge, type = "b", col = "yellow", lwd = 2, pch = 17)
+lines(thresholds, overlap_values_en, type = "b", col = "red", lwd = 2, pch = 17)
+lines(thresholds, overlap_values_lr, type = "b", col = "green", lwd = 2, pch = 17)
+lines(thresholds, overlap_values_ida, type = "b", col = "purple", lwd = 2, pch = 17)
+
+legend("bottomright", legend = c("CStar vs GES-binary", "CStar vs elastic net","CStar vs Ridge", "CStar vs logistic regression", "CStar vs IDA"),
+       col = c("blue", "red","yellow", "green", "purple"), lwd = 2, pch = c(16, 17))
+```

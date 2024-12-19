@@ -1,0 +1,105 @@
+---
+title: "preprocessing"
+author: "Yuxuan Du"
+date: "2024-11-18"
+output: html_document
+---
+
+```{r}
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(dplyr)
+
+query <- GDCquery(
+    project = "TCGA-BRCA",
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts"
+)
+# download if data was not at local
+# GDCdownload(query)
+data <- GDCprepare(query)
+
+```
+
+```{r}
+count_data <- assay(data, "unstranded")
+
+
+library(dplyr)
+
+clinical_info <- colData(data)
+clinical_info_df <- as.data.frame(clinical_info)
+# only breast tissue was included
+epithelial_samples <- clinical_info_df %>%
+    filter(tissue_or_organ_of_origin == "Breast, NOS") %>%
+    pull(barcode)
+
+# extract FPKM since all data includes the FPKM so no more normalization is needed
+filtered_count_data <- count_data[, colnames(count_data) %in% epithelial_samples]
+
+```
+
+
+```{r}
+matching_samples <- colnames(filtered_count_data) %in% clinical_info_df$barcode
+
+group <- clinical_info_df$sample_type[match(colnames(filtered_count_data), clinical_info_df$barcode)]
+
+table(is.na(group))
+
+group <- factor(group)
+
+```
+
+```{r}
+library(edgeR)
+dge <- DGEList(counts = filtered_count_data)
+
+dge <- calcNormFactors(dge)
+
+# set design matrix as healthy or tumor
+design <- model.matrix(~ group)
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+result <- glmQLFTest(fit, coef = 2)
+```
+```{r}
+top_genes <- topTags(result, n = Inf)$table
+filtered_genes <- top_genes[
+  abs(top_genes$logFC) >= log2(2) & top_genes$FDR < 0.05,
+]
+
+filtered_genes <- filtered_genes[order(filtered_genes$logFC, decreasing = TRUE), ]
+
+#select top 100 genes to ensure faster runtime of PC or glasso
+top_genes <- head(filtered_genes, n = 500)
+significant_genes <- rownames(top_genes)
+```
+
+
+```{r}
+final_count_data <- filtered_count_data[significant_genes, ]
+```
+
+```{r}
+final_count_data_df <- as.data.frame(t(final_count_data))
+final_count_data_df$barcode <- rownames(final_count_data_df)
+```
+
+```{r}
+sample_type_df = clinical_info_df|>
+  select(barcode, sample_type, paper_BRCA_Subtype_PAM50, paper_pathologic_stage)
+```
+
+```{r}
+# include geographical data in expression matrix
+final_count_data_df <- final_count_data_df |>
+  left_join(sample_type_df, by = "barcode")|>
+  select(-barcode)
+```
+
+```{r}
+write.table(final_count_data_df, file = "final_count_data_200.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```

@@ -1,0 +1,216 @@
+---
+title: "causal_inference"
+author: "Yuxuan Du"
+date: "2024-11-21"
+output: html_document
+---
+
+```{r}
+library(bnlearn)
+library(readr)
+library(dagitty)
+library(glasso)
+library(corpcor)
+```
+
+
+```{r}
+rna_seq_data = read_tsv("final_count_data_100_healthy_cancer.tsv")
+```
+
+```{r}
+rna_seq_data$Outcome <- ifelse(rna_seq_data$Outcome == "Primary Tumor", 1, 0)
+```
+
+```{r}
+library(tidyverse)
+y = rna_seq_data$Outcome
+x = rna_seq_data|>
+  select(-Outcome)|>
+  as.matrix()
+```
+
+```{r}
+library(glmnet)
+
+```
+```{r}
+cv_fit <- cv.glmnet(x, y, family = "binomial", alpha = 1)
+
+final_model = glmnet(x, y, alpha = 0, family = "binomial",lambda = cv_fit$lambda.min)
+model_coefficients <- coef(final_model)
+coef_df <- as.data.frame(as.matrix(model_coefficients))
+coef_df$Variable <- rownames(coef_df)
+write.table(coef_df, file = "ridge_coefficients.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r}
+cv_fit_en <- cv.glmnet(x, y, family = "binomial", alpha = 0.5)
+
+final_model_en = glmnet(x, y, alpha = 0.5, family = "binomial",lambda = cv_fit_en$lambda.min)
+model_coefficients_en <- coef(final_model_en)
+coef_df_en <- as.data.frame(as.matrix(model_coefficients_en))
+coef_df_en$Variable <- rownames(coef_df_en)
+write.table(coef_df_en, file = "en_coefficients.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r}
+lr = glm(Outcome ~., data =rna_seq_data, family = binomial)
+lr_coefficients <- coef(lr)
+coef_df_lr <- data.frame(lr_coefficients)
+coef_df_lr$Gene = rownames(coef_df_lr)
+write.table(coef_df_lr, file = "logistic_coefficients.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+```{r}
+library(pcalg)
+rna_seq_data_mtx <- as.matrix(rna_seq_data)
+rna_seq_data_mtx <- scale(rna_seq_data_mtx)
+
+n_nodes <- ncol(rna_seq_data_mtx)
+fixedGaps <- matrix(0, nrow = n_nodes, ncol = n_nodes)
+colnames(fixedGaps) <- rownames(fixedGaps) <- colnames(rna_seq_data_mtx)
+
+outcome_index <- which(colnames(rna_seq_data_mtx) == "Outcome")
+fixedGaps[outcome_index, ] <- 1
+
+score <- new("GaussL0penObsScore", data = rna_seq_data_mtx)
+result <- ges(score = score, fixedGaps = fixedGaps, verbose = TRUE)
+
+essgraph <- result$repr
+nodes <- essgraph$.nodes
+edges <- essgraph$.in.edges
+edge_list <- do.call(rbind, lapply(seq_along(edges), function(to_index) {
+  to_node <- nodes[to_index]      
+  from_nodes <- edges[[to_index]] 
+  if (length(from_nodes) > 0) {
+    data.frame(
+      from = nodes[from_nodes], 
+      to = to_node,             
+      stringsAsFactors = FALSE
+    )
+  } else {
+    NULL
+  }
+}))
+dag_string <- paste0(
+  "dag {\n",
+  paste(sprintf("  %s -> %s", edge_list$from, edge_list$to), collapse = "\n"),
+  "\n}"
+)
+dag <- dagitty(dag_string)
+plot(dag)
+```
+
+
+```{r}
+binarize_gene_expression <- function(data, gene_col) {
+  median_value <- median(data[[gene_col]], na.rm = TRUE)
+  binary_expression <- ifelse(data[[gene_col]] > median_value, 1, 0)
+  return(binary_expression)
+}
+```
+
+
+```{r}
+get_backdoor_adjustment_set <- function(dag, target, outcome) {
+  adjustment_set <- adjustmentSets(dag, exposure = target, outcome = outcome)
+  
+  if (length(adjustment_set) > 0) {
+    return(as.character(adjustment_set[[1]]))
+  } else {
+    return(character(0)) # 返回空集
+  }
+}
+
+```
+
+```{r}
+compute_ipw_weights <- function(data, treatment, backdoor_set) {
+  if (length(backdoor_set) == 0) {
+    return(rep(1, nrow(data)))
+  }
+  
+  formula <- as.formula(paste(treatment, "~", paste(backdoor_set, collapse = " + ")))
+  model <- glm(formula, family = binomial, data = data)
+  propensity_scores <- predict(model, type = "response")
+  
+  weights <- ifelse(data[[treatment]] == 1, 1 / propensity_scores, 1 / (1 - propensity_scores))
+  weights <- pmin(weights, 10)
+  weights <- pmax(weights, 0.1)
+  return(weights)
+}
+```
+
+```{r}
+analyze_genes <- function(data, dag, outcome) {
+  results <- data.frame(Gene = character(), Coefficient_IPW = numeric(), Coefficient_DR = numeric())
+  
+  gene_columns <- grep("^ENSG", names(data), value = TRUE)
+  for (gene in gene_columns) {
+    data$Gene_Binary <- binarize_gene_expression(data, gene)
+    print(gene)
+    backdoor_set <- get_backdoor_adjustment_set(dag, target = gene, outcome = outcome)
+    print("founded")
+    if (is.null(backdoor_set)){
+      ipw_model <- glm(as.formula(paste(outcome, "~ Gene_Binary")), family = binomial, data = data)
+      coef_ipw <- coef(ipw_model)["Gene_Binary"]
+      p_value_IPW <- summary(ipw_model)$coefficients["Gene_Binary", "Pr(>|z|)"]
+      
+      lr_model <- glm(as.formula(paste(outcome, "~", gene)), family = binomial, data = data)
+      coef_lr <- coef(lr_model)[gene]
+      p_value_lr <- summary(lr_model)$coefficients[gene, "Pr(>|z|)"]
+    }
+    else {
+      print("else")
+      weights <- compute_ipw_weights(data, "Gene_Binary", backdoor_set)
+      ipw_model <- glm(as.formula(paste(outcome, "~ Gene_Binary")), family = binomial, weights = weights, data = data)
+      coef_ipw <- coef(ipw_model)["Gene_Binary"]
+      p_value_IPW <- summary(ipw_model)$coefficients["Gene_Binary", "Pr(>|z|)"]
+      lr_model <- glm(as.formula(paste(outcome, "~", paste(backdoor_set, collapse = " + "), " + ", gene)), family = binomial, data = data)
+      coef_lr <- coef(lr_model)[gene]
+      p_value_lr <- summary(lr_model)$coefficients[gene, "Pr(>|z|)"]
+    }
+    results <- rbind(results, data.frame(Gene = gene, Coefficient_IPW = coef_ipw, P_IPW = p_value_IPW, Coefficient_lr = coef_lr, P_lr = p_value_lr))
+  }
+  
+  results <- results[order(abs(results$Coefficient_IPW), decreasing = TRUE), ]
+  return(results)
+}
+```
+
+```{r}
+results <- analyze_genes(rna_seq_data, dag, outcome = "Outcome")
+```
+
+```{r}
+library(biomaRt)
+```
+
+```{r}
+genes = results$Gene
+genes_no_version <- sub("\\..*", "", genes)
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+gene_mapping <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",                     
+  values = genes_no_version,                       
+  mart = ensembl
+)
+results$Gene_Symbol <- gene_mapping$hgnc_symbol[match(sub("\\..*", "", results$Gene), gene_mapping$ensembl_gene_id)]
+```
+
+```{r}
+library(tidyverse)
+results_filtered = results|>
+  filter(P_IPW<0.05 &P_DR<0.05)|>
+  filter(Gene_Symbol != "")|>
+  drop_na()
+```
+
+```{r}
+write.csv(results, "gene_analysis_results_100_GSE.csv", row.names = FALSE)
+```
+
